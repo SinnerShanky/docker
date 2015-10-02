@@ -20,12 +20,34 @@ type Options struct {
 	InsecureRegistries opts.ListOpts
 }
 
+const (
+	// DefaultNamespace is the default namespace
+	DefaultNamespace = "docker.io"
+	// DefaultRegistryVersionHeader is the name of the default HTTP header
+	// that carries Registry version info
+	DefaultRegistryVersionHeader = "Docker-Distribution-Api-Version"
+
+	// IndexServer is the v1 registry server used for user auth + account creation
+	IndexServer = DefaultV1Registry + "/v1/"
+	// IndexName is the name of the index
+	IndexName = "docker.io"
+
+	// NotaryServer is the endpoint serving the Notary trust server
+	NotaryServer = "https://notary.docker.io"
+
+	// IndexServer = "https://registry-stage.hub.docker.com/v1/"
+)
+
 var (
 	// ErrInvalidRepositoryName is an error returned if the repository name did
 	// not have the correct form
 	ErrInvalidRepositoryName = errors.New("Invalid repository name (ex: \"registry.domain.tld/myrepos\")")
 
 	emptyServiceConfig = NewServiceConfig(nil)
+
+	// V2Only controls access to legacy registries.  If it is set to true via the
+	// command line flag the daemon will not attempt to contact v1 legacy registries
+	V2Only = false
 )
 
 // InstallFlags adds command-line options to the top-level flag parser for
@@ -35,6 +57,7 @@ func (options *Options) InstallFlags(cmd *flag.FlagSet, usageFn func(string) str
 	cmd.Var(&options.Mirrors, []string{"-registry-mirror"}, usageFn("Preferred Docker registry mirror"))
 	options.InsecureRegistries = opts.NewListOpts(ValidateIndexName)
 	cmd.Var(&options.InsecureRegistries, []string{"-insecure-registry"}, usageFn("Enable insecure registry communication"))
+	cmd.BoolVar(&V2Only, []string{"-no-legacy-registry"}, false, "Do not contact legacy registries")
 }
 
 type netIPNet net.IPNet

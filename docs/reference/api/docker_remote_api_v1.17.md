@@ -176,7 +176,7 @@ Create a container
         Content-Type: application/json
 
         {
-             "Id":"e90e34656806"
+             "Id":"e90e34656806",
              "Warnings":[]
         }
 
@@ -1557,7 +1557,7 @@ Create a new image from a container's changes
 **Example response**:
 
         HTTP/1.1 201 Created
-        Content-Type: application/vnd.docker.raw-stream
+        Content-Type: application/json
 
         {"Id": "596069db4bf5"}
 

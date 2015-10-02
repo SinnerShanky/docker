@@ -49,6 +49,10 @@ func init() {
 	httpVersion = append(httpVersion, useragent.VersionInfo{"arch", runtime.GOARCH})
 
 	dockerUserAgent = useragent.AppendVersions("", httpVersion...)
+
+	if runtime.GOOS != "linux" {
+		V2Only = true
+	}
 }
 
 func newTLSConfig(hostname string, isSecure bool) (*tls.Config, error) {
@@ -58,7 +62,7 @@ func newTLSConfig(hostname string, isSecure bool) (*tls.Config, error) {
 	tlsConfig.InsecureSkipVerify = !isSecure
 
 	if isSecure {
-		hostDir := filepath.Join(CertsDir, hostname)
+		hostDir := filepath.Join(CertsDir, cleanPath(hostname))
 		logrus.Debugf("hostDir: %s", hostDir)
 		if err := ReadCertsDirectory(&tlsConfig, hostDir); err != nil {
 			return nil, err

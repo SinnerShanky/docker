@@ -10,55 +10,60 @@ parent = "mn_reference"
 
 # Dockerfile reference
 
-**Docker can build images automatically** by reading the instructions
-from a `Dockerfile`. A `Dockerfile` is a text document that contains all
-the commands you would normally execute manually in order to build a
-Docker image. By calling `docker build` from your terminal, you can have
-Docker build your image step by step, executing the instructions
-successively.
+Docker can build images automatically by reading the instructions from a
+`Dockerfile`. A `Dockerfile` is a text document that contains all the commands a
+user could call on the command line to assemble an image. Using `docker build`
+users can create an automated build that executes several command-line
+instructions in succession.
 
-This page discusses the specifics of all the instructions you can use in your
-`Dockerfile`. To further help you write a clear, readable, maintainable
-`Dockerfile`, we've also written a [`Dockerfile` Best Practices
-guide](/articles/dockerfile_best-practices). Lastly, you can test your
-Dockerfile knowledge with the [Dockerfile tutorial](/userguide/level1).
+This page describes the commands you can use in a `Dockerfile`. When you are
+done reading this page, refer to the [`Dockerfile` Best
+Practices](/articles/dockerfile_best-practices) for a tip-oriented guide.
 
 ## Usage
 
-To [*build*](/reference/commandline/cli/#build) an image from a source repository,
-create a description file called `Dockerfile` at the root of your repository.
-This file will describe the steps to assemble the image.
+The [`docker build`](/reference/commandline/build/) command builds an image from
+a `Dockerfile` and a *context*. The build's context is the files at a specified
+location `PATH` or `URL`. The `PATH` is a directory on your local filesystem.
+The `URL` is a the location of a Git repository.
 
-Then call `docker build` with the path of your source repository as the argument
-(for example, `.`):
+A context is processed recursively. So, a `PATH` includes any subdirectories and
+the `URL` includes the repository and its submodules. A simple build command
+that uses the current directory as context:
 
     $ docker build .
+    Sending build context to Docker daemon  6.51 MB
+    ...
 
-The path to the source repository defines where to find the *context* of
-the build. The build is run by the Docker daemon, not by the CLI, so the
-whole context must be transferred to the daemon. The Docker CLI reports
-"Sending build context to Docker daemon" when the context is sent to the daemon.
+The build is run by the Docker daemon, not by the CLI. The first thing a build
+process does is send the entire context (recursively) to the daemon.  In most
+cases, it's best to start with an empty directory as context and keep your
+Dockerfile in that directory. Add only the files needed for building the
+Dockerfile.
 
-> **Warning**
-> Avoid using your root directory, `/`, as the root of the source repository. The 
-> `docker build` command will use whatever directory contains the Dockerfile as the build
-> context (including all of its subdirectories). The build context will be sent to the
-> Docker daemon before building the image, which means if you use `/` as the source
-> repository, the entire contents of your hard drive will get sent to the daemon (and
-> thus to the machine running the daemon). You probably don't want that.
+>**Warning**: Do not use your root directory, `/`, as the `PATH` as it causes
+>the build to transfer the entire contents of your hard drive to the Docker
+>daemon. 
 
-In most cases, it's best to put each Dockerfile in an empty directory. Then,
-only add the files needed for building the Dockerfile to the directory. To
-increase the build's performance, you can exclude files and directories by
-adding a `.dockerignore` file to the directory.  For information about how to
-[create a `.dockerignore` file](#dockerignore-file) on this page.
+To use a file in the build context, the `Dockerfile` refers to the file specified
+in an instruction, for example,  a `COPY` instruction. To increase the build's
+performance, exclude files and directories by adding a `.dockerignore` file to
+the context directory.  For information about how to [create a `.dockerignore`
+file](#dockerignore-file) see the documentation on this page.
+
+Traditionally, the `Dockerfile` is called `Dockerfile` and located in the root
+of the context. You use the `-f` flag with `docker build` to point to a Dockerfile
+anywhere in your file system.
+
+    $ docker build -f /path/to/a/Dockerfile .
 
 You can specify a repository and tag at which to save the new image if
 the build succeeds:
 
     $ docker build -t shykes/myapp .
 
-The Docker daemon will run your steps one-by-one, committing the result
+The Docker daemon runs the instructions in the `Dockerfile` one-by-one,
+committing the result of each instruction
 to a new image if necessary, before finally outputting the ID of your
 new image. The Docker daemon will automatically clean up the context you
 sent.
@@ -67,10 +72,11 @@ Note that each instruction is run independently, and causes a new image
 to be created - so `RUN cd /tmp` will not have any effect on the next
 instructions.
 
-Whenever possible, Docker will re-use the intermediate images,
-accelerating `docker build` significantly (indicated by `Using cache` -
-see the [`Dockerfile` Best Practices
-guide](/articles/dockerfile_best-practices/#build-cache) for more information):
+Whenever possible, Docker will re-use the intermediate images (cache),
+to accelerate the `docker build` process significantly. This is indicated by
+the `Using cache` message in the console output.
+(For more information, see the [Build cache section](/articles/dockerfile_best-practices/#build-cache)) in the
+`Dockerfile` best practices guide:
 
     $ docker build -t SvenDowideit/ambassador .
     Uploading context 10.24 kB
@@ -95,12 +101,12 @@ Here is the format of the `Dockerfile`:
     # Comment
     INSTRUCTION arguments
 
-The Instruction is not case-sensitive, however convention is for them to
+The instruction is not case-sensitive, however convention is for them to
 be UPPERCASE in order to distinguish them from arguments more easily.
 
 Docker runs the instructions in a `Dockerfile` in order. **The
 first instruction must be \`FROM\`** in order to specify the [*Base
-Image*](/terms/image/#base-image) from which you are building.
+Image*](/reference/glossary/#base-image) from which you are building.
 
 Docker will treat lines that *begin* with `#` as a
 comment. A `#` marker anywhere else in the line will
@@ -113,12 +119,6 @@ Here is the set of instructions you can use in a `Dockerfile` for building
 images.
 
 ### Environment replacement
-
-> **Note**: prior to 1.3, `Dockerfile` environment variables were handled
-> similarly, in that they would be replaced as described below. However, there
-> was no formal definition on as to which instructions handled environment
-> replacement at the time. After 1.3 this behavior will be preserved and
-> canonical.
 
 Environment variables (declared with [the `ENV` statement](#env)) can also be
 used in certain instructions as variables to be interpreted by the
@@ -159,9 +159,11 @@ the `Dockerfile`:
 * `COPY`
 * `ENV`
 * `EXPOSE`
+* `LABEL`
 * `USER`
 * `WORKDIR`
 * `VOLUME`
+* `STOPSIGNAL`
 
 as well as:
 
@@ -172,13 +174,13 @@ as well as:
 > variable, even when combined with any of the instructions listed above.
 
 Environment variable substitution will use the same value for each variable
-throughout the entire command.  In other words, in this example:
+throughout the entire command. In other words, in this example:
 
     ENV abc=hello
     ENV abc=bye def=$abc
     ENV ghi=$abc
 
-will result in `def` having a value of `hello`, not `bye`.  However, 
+will result in `def` having a value of `hello`, not `bye`. However, 
 `ghi` will have a value of `bye` because it is not part of the same command
 that set `abc` to `bye`.
 
@@ -197,7 +199,7 @@ expansion) is done using Go's
 
 You can specify exceptions to exclusion rules. To do this, simply prefix a
 pattern with an `!` (exclamation mark) in the same way you would in a
-`.gitignore` file.  Currently there is no support for regular expressions.
+`.gitignore` file. Currently there is no support for regular expressions.
 Formats like `[^temp*]` are ignored. 
 
 The following is an example `.dockerignore` file:
@@ -218,7 +220,7 @@ This file causes the following build behavior:
 | `*/*/temp*`    | Exclude files starting with name `temp` from any subdirectory that is two levels below the root directory. For example, the file `/somedir/subdir/temporary.txt` is ignored. |
 | `temp?`        | Exclude the files that match the pattern in the root directory. For example, the files `tempa`, `tempb` in the root directory are ignored.                                   |
 | `*.md `        | Exclude all markdown files in the root directory.                                                                                                                            |
-| `!LICENSE.md`  | Exception to the Markdown files exclusion is this file,  `LICENSE.md`, Include this file in the build.                                                                       |
+| `!LICENSE.md`  | Exception to the Markdown files exclusion. `LICENSE.md`is included  in the build.                                                                       |
 
 The placement of  `!` exception rules influences the matching algorithm; the
 last line of the `.dockerignore` that matches a particular file determines
@@ -257,19 +259,19 @@ Or
 
     FROM <image>@<digest>
 
-The `FROM` instruction sets the [*Base Image*](/terms/image/#base-image)
+The `FROM` instruction sets the [*Base Image*](/reference/glossary/#base-image)
 for subsequent instructions. As such, a valid `Dockerfile` must have `FROM` as
 its first instruction. The image can be any valid image – it is especially easy
 to start by **pulling an image** from the [*Public Repositories*](
 /userguide/dockerrepos).
 
-`FROM` must be the first non-comment instruction in the `Dockerfile`.
+- `FROM` must be the first non-comment instruction in the `Dockerfile`.
 
-`FROM` can appear multiple times within a single `Dockerfile` in order to create
+- `FROM` can appear multiple times within a single `Dockerfile` in order to create
 multiple images. Simply make a note of the last image ID output by the commit
 before each new `FROM` command.
 
-The `tag` or `digest` values are optional. If you omit either of them, the builder
+- The `tag` or `digest` values are optional. If you omit either of them, the builder
 assumes a `latest` by default. The builder returns an error if it cannot match
 the `tag` value.
 
@@ -284,7 +286,7 @@ generated images.
 
 RUN has 2 forms:
 
-- `RUN <command>` (the command is run in a shell - `/bin/sh -c` - *shell* form)
+- `RUN <command>` (*shell* form, the command is run in a shell - `/bin/sh -c`)
 - `RUN ["executable", "param1", "param2"]` (*exec* form)
 
 The `RUN` instruction will execute any commands in a new layer on top of the
@@ -297,6 +299,17 @@ any point in an image's history, much like source control.
 
 The *exec* form makes it possible to avoid shell string munging, and to `RUN`
 commands using a base image that does not contain `/bin/sh`.
+
+In the *shell* form you can use a `\` (backslash) to continue a single
+RUN instruction onto the next line. For example, consider these two lines:
+```
+RUN /bin/bash -c 'source $HOME/.bashrc ;\
+echo $HOME'
+```
+Together they are equivalent to this single line:
+```
+RUN /bin/bash -c 'source $HOME/.bashrc ; echo $HOME'
+```
 
 > **Note**:
 > To use a different shell, other than '/bin/sh', use the *exec* form
@@ -316,7 +329,7 @@ commands using a base image that does not contain `/bin/sh`.
 
 The cache for `RUN` instructions isn't invalidated automatically during
 the next build. The cache for an instruction like 
-`RUN apt-get dist-upgrade -y` will be reused during the next build.  The 
+`RUN apt-get dist-upgrade -y` will be reused during the next build. The 
 cache for `RUN` instructions can be invalidated by using the `--no-cache` 
 flag, for example `docker build --no-cache`.
 
@@ -406,28 +419,31 @@ default specified in `CMD`.
 
 The `LABEL` instruction adds metadata to an image. A `LABEL` is a
 key-value pair. To include spaces within a `LABEL` value, use quotes and
-backslashes as you would in command-line parsing.
+backslashes as you would in command-line parsing. A few usage examples:
 
     LABEL "com.example.vendor"="ACME Incorporated"
-
-An image can have more than one label. To specify multiple labels, separate each
-key-value pair with whitespace.
-
     LABEL com.example.label-with-value="foo"
     LABEL version="1.0"
     LABEL description="This text illustrates \
     that label-values can span multiple lines."
 
-Docker recommends combining labels in a single `LABEL` instruction where
+An image can have more than one label. To specify multiple labels,
+Docker recommends combining labels into a single `LABEL` instruction where
 possible. Each `LABEL` instruction produces a new layer which can result in an
-inefficient image if you use many labels. This example results in four image
-layers. 
+inefficient image if you use many labels. This example results in a single image
+layer. 
 
     LABEL multi.label1="value1" multi.label2="value2" other="value3"
+
+The above can also be written as:
+
+    LABEL multi.label1="value1" \
+          multi.label2="value2" \
+          other="value3"
     
-Labels are additive including `LABEL`s in `FROM` images. As the system
-encounters and then applies a new label, new `key`s override any previous labels
-with identical keys.    
+Labels are additive including `LABEL`s in `FROM` images. If Docker
+encounters a label/key that already exists, the new value overrides any previous
+labels with identical keys.
 
 To view an image's labels, use the `docker inspect` command.
 
@@ -488,14 +504,14 @@ and
     ENV myCat fluffy
 
 will yield the same net results in the final container, but the first form 
-does it all in one layer.
+is preferred because it produces a single cache layer.
 
 The environment variables set using `ENV` will persist when a container is run
 from the resulting image. You can view the values using `docker inspect`, and
 change them using `docker run --env <key>=<value>`.
 
 > **Note**:
-> Environment persistence can cause unexpected effects. For example,
+> Environment persistence can cause unexpected side effects. For example,
 > setting `ENV DEBIAN_FRONTEND noninteractive` may confuse apt-get
 > users on a Debian-based image. To set a value for a single command, use
 > `RUN <key>=<value> <command>`.
@@ -516,16 +532,16 @@ directories then they must be relative to the source directory that is
 being built (the context of the build).
 
 Each `<src>` may contain wildcards and matching will be done using Go's
-[filepath.Match](http://golang.org/pkg/path/filepath#Match) rules.
-For most command line uses this should act as expected, for example:
+[filepath.Match](http://golang.org/pkg/path/filepath#Match) rules. For example:
 
     ADD hom* /mydir/        # adds all files starting with "hom"
-    ADD hom?.txt /mydir/    # ? is replaced with any single character
+    ADD hom?.txt /mydir/    # ? is replaced with any single character, e.g., "home.txt"
 
 The `<dest>` is an absolute path, or a path relative to `WORKDIR`, into which
 the source will be copied inside the destination container.
 
-    ADD test aDir/          # adds "test" to `WORKDIR`/aDir/
+    ADD test relativeDir/          # adds "test" to `WORKDIR`/relativeDir/
+    ADD test /absoluteDir          # adds "test" to /absoluteDir
 
 All new files and directories are created with a UID and GID of 0.
 
@@ -558,7 +574,7 @@ of whether or not the file has changed and the cache should be updated.
 guide](/articles/dockerfile_best-practices/#build-cache) for more information.
 
 
-The copy obeys the following rules:
+`ADD` obeys the following rules:
 
 - The `<src>` path must be inside the *context* of the build;
   you cannot `ADD ../something /something`, because the first step of a
@@ -577,6 +593,7 @@ The copy obeys the following rules:
 
 - If `<src>` is a directory, the entire contents of the directory are copied, 
   including filesystem metadata. 
+
 > **Note**:
 > The directory itself is not copied, just its contents.
 
@@ -619,16 +636,16 @@ Multiple `<src>` resource may be specified but they must be relative
 to the source directory that is being built (the context of the build).
 
 Each `<src>` may contain wildcards and matching will be done using Go's
-[filepath.Match](http://golang.org/pkg/path/filepath#Match) rules.
-For most command line uses this should act as expected, for example:
+[filepath.Match](http://golang.org/pkg/path/filepath#Match) rules. For example:
 
     COPY hom* /mydir/        # adds all files starting with "hom"
-    COPY hom?.txt /mydir/    # ? is replaced with any single character
+    COPY hom?.txt /mydir/    # ? is replaced with any single character, e.g., "home.txt"
 
 The `<dest>` is an absolute path, or a path relative to `WORKDIR`, into which
 the source will be copied inside the destination container.
 
-    COPY test aDir/          # adds "test" to `WORKDIR`/aDir/
+    COPY test relativeDir/   # adds "test" to `WORKDIR`/relativeDir/
+    COPY test /absoluteDir   # adds "test" to /absoluteDir
 
 All new files and directories are created with a UID and GID of 0.
 
@@ -636,7 +653,7 @@ All new files and directories are created with a UID and GID of 0.
 > If you build using STDIN (`docker build - < somefile`), there is no
 > build context, so `COPY` can't be used.
 
-The copy obeys the following rules:
+`COPY` obeys the following rules:
 
 - The `<src>` path must be inside the *context* of the build;
   you cannot `COPY ../something /something`, because the first step of a
@@ -645,6 +662,7 @@ The copy obeys the following rules:
 
 - If `<src>` is a directory, the entire contents of the directory are copied, 
   including filesystem metadata. 
+
 > **Note**:
 > The directory itself is not copied, just its contents.
 
@@ -668,7 +686,7 @@ The copy obeys the following rules:
 ENTRYPOINT has two forms:
 
 - `ENTRYPOINT ["executable", "param1", "param2"]`
-  (the preferred *exec* form)
+  (*exec* form, preferred)
 - `ENTRYPOINT command param1 param2`
   (*shell* form)
 
@@ -894,9 +912,9 @@ The `VOLUME` instruction creates a mount point with the specified name
 and marks it as holding externally mounted volumes from native host or other
 containers. The value can be a JSON array, `VOLUME ["/var/log/"]`, or a plain
 string with multiple arguments, such as `VOLUME /var/log` or `VOLUME /var/log
-/var/db`.  For more information/examples and mounting instructions via the
+/var/db`. For more information/examples and mounting instructions via the
 Docker client, refer to 
-[*Share Directories via Volumes*](/userguide/dockervolumes/#volume)
+[*Share Directories via Volumes*](/userguide/dockervolumes/#mount-a-host-directory-as-a-data-volume)
 documentation.
 
 The `docker run` command initializes the newly created volume with any data 
@@ -911,6 +929,10 @@ consider the following Dockerfile snippet:
 This Dockerfile results in an image that causes `docker run`, to
 create a new mount point at `/myvol` and copy the  `greeting` file 
 into the newly created volume.
+
+> **Note**:
+> If any build steps change the data within the volume after it has been
+> declared, those changes will be discarded.
 
 > **Note**:
 > The list is parsed as a JSON array, which means that
@@ -949,9 +971,132 @@ For example:
 
     ENV DIRPATH /path
     WORKDIR $DIRPATH/$DIRNAME
+    RUN pwd
 
 The output of the final `pwd` command in this `Dockerfile` would be
 `/path/$DIRNAME`
+
+## ARG
+
+    ARG <name>[=<default value>]
+
+The `ARG` instruction defines a variable that users can pass at build-time to
+the builder with the `docker build` command using the `--build-arg
+<varname>=<value>` flag. If a user specifies a build argument that was not
+defined in the Dockerfile, the build outputs an error.
+
+```
+One or more build-args were not consumed, failing build.
+```
+
+The Dockerfile author can define a single variable by specifying `ARG` once or many
+variables by specifying `ARG` more than once. For example, a valid Dockerfile:
+
+```
+FROM busybox
+ARG user1
+ARG buildno
+...
+```
+
+A Dockerfile author may optionally specify a default value for an `ARG` instruction:
+
+```
+FROM busybox
+ARG user1=someuser
+ARG buildno=1
+...
+```
+
+If an `ARG` value has a default and if there is no value passed at build-time, the
+builder uses the default.
+
+An `ARG` variable definition comes into effect from the line on which it is
+defined in the `Dockerfile` not from the argument's use on the command-line or
+elsewhere.  For example, consider this Dockerfile:
+
+```
+1 FROM busybox
+2 USER ${user:-some_user}
+3 ARG user
+4 USER $user
+...
+```
+A user builds this file by calling:
+
+```
+$ docker build --build-arg user=what_user Dockerfile
+```
+
+The `USER` at line 2 evaluates to `some_user` as the `user` variable is defined on the
+subsequent line 3. The `USER` at line 4 evaluates to `what_user` as `user` is
+defined and the `what_user` value was passed on the command line. Prior to its definition by an
+`ARG` instruction, any use of a variable results in an empty string.
+
+> **Note:** It is not recommended to use build-time variables for
+>  passing secrets like github keys, user credentials etc.
+
+You can use an `ARG` or an `ENV` instruction to specify variables that are
+available to the `RUN` instruction. Environment variables defined using the
+`ENV` instruction always override an `ARG` instruction of the same name. Consider
+this Dockerfile with an `ENV` and `ARG` instruction.
+
+```
+1 FROM ubuntu
+2 ARG CONT_IMG_VER
+3 ENV CONT_IMG_VER v1.0.0
+4 RUN echo $CONT_IMG_VER
+```
+Then, assume this image is built with this command:
+
+```
+$ docker build --build-arg CONT_IMG_VER=v2.0.1 Dockerfile
+```
+
+In this case, the `RUN` instruction uses `v1.0.0` instead of the `ARG` setting
+passed by the user:`v2.0.1` This behavior is similar to a shell
+script where a locally scoped variable overrides the variables passed as
+arguments or inherited from environment, from its point of definition.
+
+Using the example above but a different `ENV` specification you can create more
+useful interactions between `ARG` and `ENV` instructions:
+
+```
+1 FROM ubuntu
+2 ARG CONT_IMG_VER
+3 ENV CONT_IMG_VER ${CONT_IMG_VER:-v1.0.0}
+4 RUN echo $CONT_IMG_VER
+```
+
+Unlike an `ARG` instruction, `ENV` values are always persisted in the built
+image. Consider a docker build without the --build-arg flag:
+
+```
+$ docker build Dockerfile
+```
+
+Using this Dockerfile example, `CONT_IMG_VER` is still persisted in the image but
+its value would be `v1.0.0` as it is the default set in line 3 by the `ENV` instruction.
+
+The variable expansion technique in this example allows you to pass arguments
+from the command line and persist them in the final image by leveraging the
+`ENV` instruction. Variable expansion is only supported for [a limited set of
+Dockerfile instructions.](#environment-replacement)
+
+Docker has a set of predefined `ARG` variables that you can use without a
+corresponding `ARG` instruction in the Dockerfile.
+
+* `HTTP_PROXY`
+* `http_proxy`
+* `HTTPS_PROXY`
+* `https_proxy`
+* `FTP_PROXY`
+* `ftp_proxy`
+* `NO_PROXY`
+* `no_proxy`
+
+To use these, simply pass them on the command line using the `--build-arg
+<varname>=<value>` flag.
 
 ## ONBUILD
 
@@ -1010,6 +1155,14 @@ For example you might add something like this:
 > **Warning**: Chaining `ONBUILD` instructions using `ONBUILD ONBUILD` isn't allowed.
 
 > **Warning**: The `ONBUILD` instruction may not trigger `FROM` or `MAINTAINER` instructions.
+
+## STOPSIGNAL
+
+	STOPSIGNAL signal
+
+The `STOPSIGNAL` instruction sets the system call signal that will be sent to the container to exit.
+This signal can be a valid unsigned number that matches a position in the kernel's syscall table, for instance 9,
+or a signal name in the format SIGNAME, for instance SIGKILL.
 
 ## Dockerfile examples
 

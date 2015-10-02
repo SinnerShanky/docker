@@ -18,7 +18,7 @@ import (
 
 // createContainer populates and configures the container type with the
 // data provided by the execdriver.Command
-func (d *Driver) createContainer(c *execdriver.Command) (*configs.Config, error) {
+func (d *Driver) createContainer(c *execdriver.Command, hooks execdriver.Hooks) (*configs.Config, error) {
 	container := execdriver.InitContainer(c)
 
 	if err := d.createIpc(container, c); err != nil {
@@ -33,7 +33,7 @@ func (d *Driver) createContainer(c *execdriver.Command) (*configs.Config, error)
 		return nil, err
 	}
 
-	if err := d.createNetwork(container, c); err != nil {
+	if err := d.createNetwork(container, c, hooks); err != nil {
 		return nil, err
 	}
 
@@ -64,7 +64,13 @@ func (d *Driver) createContainer(c *execdriver.Command) (*configs.Config, error)
 			return nil, err
 		}
 	}
-
+	// add CAP_ prefix to all caps for new libcontainer update to match
+	// the spec format.
+	for i, s := range container.Capabilities {
+		if !strings.HasPrefix(s, "CAP_") {
+			container.Capabilities[i] = fmt.Sprintf("CAP_%s", s)
+		}
+	}
 	container.AdditionalGroups = c.GroupAdd
 
 	if c.AppArmorProfile != "" {
@@ -113,7 +119,7 @@ func generateIfaceName() (string, error) {
 	return "", errors.New("Failed to find name for new interface")
 }
 
-func (d *Driver) createNetwork(container *configs.Config, c *execdriver.Command) error {
+func (d *Driver) createNetwork(container *configs.Config, c *execdriver.Command, hooks execdriver.Hooks) error {
 	if c.Network == nil {
 		return nil
 	}
@@ -135,11 +141,30 @@ func (d *Driver) createNetwork(container *configs.Config, c *execdriver.Command)
 		return nil
 	}
 
-	if c.Network.NamespacePath == "" {
-		return fmt.Errorf("network namespace path is empty")
+	if c.Network.NamespacePath != "" {
+		container.Namespaces.Add(configs.NEWNET, c.Network.NamespacePath)
+		return nil
 	}
-
-	container.Namespaces.Add(configs.NEWNET, c.Network.NamespacePath)
+	// only set up prestart hook if the namespace path is not set (this should be
+	// all cases *except* for --net=host shared networking)
+	container.Hooks = &configs.Hooks{
+		Prestart: []configs.Hook{
+			configs.NewFunctionHook(func(s configs.HookState) error {
+				if len(hooks.PreStart) > 0 {
+					for _, fnHook := range hooks.PreStart {
+						// A closed channel for OOM is returned here as it will be
+						// non-blocking and return the correct result when read.
+						chOOM := make(chan struct{})
+						close(chOOM)
+						if err := fnHook(&c.ProcessConfig, s.Pid, chOOM); err != nil {
+							return err
+						}
+					}
+				}
+				return nil
+			}),
+		},
+	}
 	return nil
 }
 
@@ -198,9 +223,8 @@ func (d *Driver) setPrivileged(container *configs.Config) (err error) {
 	container.Devices = hostDevices
 
 	if apparmor.IsEnabled() {
-		container.AppArmorProfile = "docker-unconfined"
+		container.AppArmorProfile = "unconfined"
 	}
-
 	return nil
 }
 

@@ -56,12 +56,6 @@ func handleGlobalDaemonFlag() {
 	}
 
 	if *flDaemon {
-		if *flHelp {
-			// We do not show the help output here, instead, we tell the user about the new daemon command,
-			// because the help output is so long they would not see the warning anyway.
-			fmt.Fprintln(os.Stderr, "Please use 'docker daemon --help' instead.")
-			os.Exit(0)
-		}
 		daemonCli.(*DaemonCli).CmdDaemon(flag.Args()...)
 		os.Exit(0)
 	}
@@ -76,6 +70,7 @@ func NewDaemonCli() *DaemonCli {
 
 	// TODO(tiborvass): remove InstallFlags?
 	daemonConfig := new(daemon.Config)
+	daemonConfig.LogConfig.Config = make(map[string]string)
 	daemonConfig.InstallFlags(daemonFlags, presentInHelp)
 	daemonConfig.InstallFlags(flag.CommandLine, absentFromHelp)
 	registryOptions := new(registry.Options)
@@ -100,6 +95,7 @@ func migrateKey() (err error) {
 				err = os.Remove(oldPath)
 			} else {
 				logrus.Warnf("Key migration failed, key file not removed at %s", oldPath)
+				os.Remove(newPath)
 			}
 		}()
 
@@ -210,10 +206,6 @@ func (cli *DaemonCli) CmdDaemon(args ...string) error {
 		}()
 	}
 
-	if cli.LogConfig.Config == nil {
-		cli.LogConfig.Config = make(map[string]string)
-	}
-
 	serverConfig := &apiserver.Config{
 		Logging: true,
 		Version: dockerversion.VERSION,
@@ -231,21 +223,6 @@ func (cli *DaemonCli) CmdDaemon(args ...string) error {
 		}
 		serverConfig.TLSConfig = tlsConfig
 	}
-
-	api := apiserver.New(serverConfig)
-
-	// The serve API routine never exits unless an error occurs
-	// We need to start it as a goroutine and wait on it so
-	// daemon doesn't exit
-	serveAPIWait := make(chan error)
-	go func() {
-		if err := api.ServeAPI(commonFlags.Hosts); err != nil {
-			logrus.Errorf("ServeAPI error: %v", err)
-			serveAPIWait <- err
-			return
-		}
-		serveAPIWait <- nil
-	}()
 
 	if err := migrateKey(); err != nil {
 		logrus.Fatal(err)
@@ -272,6 +249,22 @@ func (cli *DaemonCli) CmdDaemon(args ...string) error {
 		"graphdriver": d.GraphDriver().String(),
 	}).Info("Docker daemon")
 
+	api := apiserver.New(serverConfig)
+	api.InitRouters(d)
+
+	// The serve API routine never exits unless an error occurs
+	// We need to start it as a goroutine and wait on it so
+	// daemon doesn't exit
+	serveAPIWait := make(chan error)
+	go func() {
+		if err := api.ServeAPI(commonFlags.Hosts); err != nil {
+			logrus.Errorf("ServeAPI error: %v", err)
+			serveAPIWait <- err
+			return
+		}
+		serveAPIWait <- nil
+	}()
+
 	signal.Trap(func() {
 		api.Close()
 		<-serveAPIWait
@@ -285,7 +278,8 @@ func (cli *DaemonCli) CmdDaemon(args ...string) error {
 
 	// after the daemon is done setting up we can tell the api to start
 	// accepting connections with specified daemon
-	api.AcceptConnections(d)
+	notifySystem()
+	api.AcceptConnections()
 
 	// Daemon is fully initialized and handling API traffic
 	// Wait for serve API to complete
@@ -313,7 +307,7 @@ func shutdownDaemon(d *daemon.Daemon, timeout time.Duration) {
 	}()
 	select {
 	case <-ch:
-		logrus.Debug("Clean shutdown succeded")
+		logrus.Debug("Clean shutdown succeeded")
 	case <-time.After(timeout * time.Second):
 		logrus.Error("Force shutdown daemon")
 	}

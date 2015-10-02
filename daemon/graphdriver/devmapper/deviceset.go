@@ -70,20 +70,19 @@ type devInfo struct {
 	//
 	// WARNING: In order to avoid AB-BA deadlocks when releasing
 	// the global lock while holding the per-device locks all
-	// device locks must be aquired *before* the device lock, and
-	// multiple device locks should be aquired parent before child.
+	// device locks must be acquired *before* the device lock, and
+	// multiple device locks should be acquired parent before child.
 	lock sync.Mutex
 }
 
 type metaData struct {
-	Devices     map[string]*devInfo `json:"Devices"`
-	devicesLock sync.Mutex          // Protects all read/writes to Devices map
+	Devices map[string]*devInfo `json:"Devices"`
 }
 
 // DeviceSet holds information about list of devices
 type DeviceSet struct {
 	metaData      `json:"-"`
-	sync.Mutex    `json:"-"` // Protects Devices map and serializes calls into libdevmapper
+	sync.Mutex    `json:"-"` // Protects all fields of DeviceSet and serializes calls into libdevmapper
 	root          string
 	devicePrefix  string
 	TransactionID uint64 `json:"-"`
@@ -232,7 +231,7 @@ func (devices *DeviceSet) hasImage(name string) bool {
 
 // ensureImage creates a sparse file of <size> bytes at the path
 // <root>/devicemapper/<name>.
-// If the file already exists, it does nothing.
+// If the file already exists and new size is larger than its current size, it grows to the new size.
 // Either way it returns the full path.
 func (devices *DeviceSet) ensureImage(name string, size int64) (string, error) {
 	dirname := devices.loopbackDir()
@@ -242,7 +241,7 @@ func (devices *DeviceSet) ensureImage(name string, size int64) (string, error) {
 		return "", err
 	}
 
-	if _, err := os.Stat(filename); err != nil {
+	if fi, err := os.Stat(filename); err != nil {
 		if !os.IsNotExist(err) {
 			return "", err
 		}
@@ -256,6 +255,19 @@ func (devices *DeviceSet) ensureImage(name string, size int64) (string, error) {
 		if err := file.Truncate(size); err != nil {
 			return "", err
 		}
+	} else {
+		if fi.Size() < size {
+			file, err := os.OpenFile(filename, os.O_RDWR|os.O_CREATE, 0600)
+			if err != nil {
+				return "", err
+			}
+			defer file.Close()
+			if err := file.Truncate(size); err != nil {
+				return "", fmt.Errorf("Unable to grow loopback file %s: %v", filename, err)
+			}
+		} else if fi.Size() > size {
+			logrus.Warnf("Can't shrink loopback file %s", filename)
+		}
 	}
 	return filename, nil
 }
@@ -266,7 +278,7 @@ func (devices *DeviceSet) allocateTransactionID() uint64 {
 }
 
 func (devices *DeviceSet) updatePoolTransactionID() error {
-	if err := devicemapper.SetTransactionId(devices.getPoolDevName(), devices.TransactionID, devices.OpenTransactionID); err != nil {
+	if err := devicemapper.SetTransactionID(devices.getPoolDevName(), devices.TransactionID, devices.OpenTransactionID); err != nil {
 		return fmt.Errorf("Error setting devmapper transaction ID: %s", err)
 	}
 	devices.TransactionID = devices.OpenTransactionID
@@ -342,9 +354,8 @@ func (devices *DeviceSet) isDeviceIDFree(deviceID int) bool {
 	return true
 }
 
+// Should be called with devices.Lock() held.
 func (devices *DeviceSet) lookupDevice(hash string) (*devInfo, error) {
-	devices.devicesLock.Lock()
-	defer devices.devicesLock.Unlock()
 	info := devices.Devices[hash]
 	if info == nil {
 		info = devices.loadMetadata(hash)
@@ -355,6 +366,13 @@ func (devices *DeviceSet) lookupDevice(hash string) (*devInfo, error) {
 		devices.Devices[hash] = info
 	}
 	return info, nil
+}
+
+func (devices *DeviceSet) lookupDeviceWithLock(hash string) (*devInfo, error) {
+	devices.Lock()
+	defer devices.Unlock()
+	info, err := devices.lookupDevice(hash)
+	return info, err
 }
 
 func (devices *DeviceSet) deviceFileWalkFunction(path string, finfo os.FileInfo) error {
@@ -375,6 +393,11 @@ func (devices *DeviceSet) deviceFileWalkFunction(path string, finfo os.FileInfo)
 		return nil
 	}
 
+	if finfo.Name() == transactionMetaFile {
+		logrus.Debugf("Skipping file %s", path)
+		return nil
+	}
+
 	logrus.Debugf("Loading data for file %s", path)
 
 	hash := finfo.Name()
@@ -387,15 +410,7 @@ func (devices *DeviceSet) deviceFileWalkFunction(path string, finfo os.FileInfo)
 		return fmt.Errorf("Error loading device metadata file %s", hash)
 	}
 
-	if dinfo.DeviceID > maxDeviceID {
-		logrus.Errorf("Ignoring Invalid DeviceID=%d", dinfo.DeviceID)
-		return nil
-	}
-
-	devices.Lock()
 	devices.markDeviceIDUsed(dinfo.DeviceID)
-	devices.Unlock()
-
 	logrus.Debugf("Added deviceID=%d to DeviceIDMap", dinfo.DeviceID)
 	return nil
 }
@@ -421,6 +436,7 @@ func (devices *DeviceSet) constructDeviceIDMap() error {
 	return filepath.Walk(devices.metadataDir(), scan)
 }
 
+// Should be called with devices.Lock() held.
 func (devices *DeviceSet) unregisterDevice(id int, hash string) error {
 	logrus.Debugf("unregisterDevice(%v, %v)", id, hash)
 	info := &devInfo{
@@ -428,9 +444,7 @@ func (devices *DeviceSet) unregisterDevice(id int, hash string) error {
 		DeviceID: id,
 	}
 
-	devices.devicesLock.Lock()
 	delete(devices.Devices, hash)
-	devices.devicesLock.Unlock()
 
 	if err := devices.removeMetadata(info); err != nil {
 		logrus.Debugf("Error removing metadata: %s", err)
@@ -440,6 +454,7 @@ func (devices *DeviceSet) unregisterDevice(id int, hash string) error {
 	return nil
 }
 
+// Should be called with devices.Lock() held.
 func (devices *DeviceSet) registerDevice(id int, hash string, size uint64, transactionID uint64) (*devInfo, error) {
 	logrus.Debugf("registerDevice(%v, %v)", id, hash)
 	info := &devInfo{
@@ -451,15 +466,11 @@ func (devices *DeviceSet) registerDevice(id int, hash string, size uint64, trans
 		devices:       devices,
 	}
 
-	devices.devicesLock.Lock()
 	devices.Devices[hash] = info
-	devices.devicesLock.Unlock()
 
 	if err := devices.saveMetadata(info); err != nil {
 		// Try to remove unused device
-		devices.devicesLock.Lock()
 		delete(devices.Devices, hash)
-		devices.devicesLock.Unlock()
 		return nil, err
 	}
 
@@ -543,6 +554,9 @@ func (devices *DeviceSet) migrateOldMetaData() error {
 }
 
 func (devices *DeviceSet) initMetaData() error {
+	devices.Lock()
+	defer devices.Unlock()
+
 	if err := devices.migrateOldMetaData(); err != nil {
 		return err
 	}
@@ -583,6 +597,9 @@ func (devices *DeviceSet) getNextFreeDeviceID() (int, error) {
 }
 
 func (devices *DeviceSet) createRegisterDevice(hash string) (*devInfo, error) {
+	devices.Lock()
+	defer devices.Unlock()
+
 	deviceID, err := devices.getNextFreeDeviceID()
 	if err != nil {
 		return nil, err
@@ -596,7 +613,7 @@ func (devices *DeviceSet) createRegisterDevice(hash string) (*devInfo, error) {
 
 	for {
 		if err := devicemapper.CreateDevice(devices.getPoolDevName(), deviceID); err != nil {
-			if devicemapper.DeviceIdExists(err) {
+			if devicemapper.DeviceIDExists(err) {
 				// Device ID already exists. This should not
 				// happen. Now we have a mechianism to find
 				// a free device ID. So something is not right.
@@ -648,7 +665,7 @@ func (devices *DeviceSet) createRegisterSnapDevice(hash string, baseInfo *devInf
 
 	for {
 		if err := devicemapper.CreateSnapDevice(devices.getPoolDevName(), deviceID, baseInfo.Name(), baseInfo.DeviceID); err != nil {
-			if devicemapper.DeviceIdExists(err) {
+			if devicemapper.DeviceIDExists(err) {
 				// Device ID already exists. This should not
 				// happen. Now we have a mechianism to find
 				// a free device ID. So something is not right.
@@ -694,6 +711,11 @@ func (devices *DeviceSet) loadMetadata(hash string) *devInfo {
 	}
 
 	if err := json.Unmarshal(jsonData, &info); err != nil {
+		return nil
+	}
+
+	if info.DeviceID > maxDeviceID {
+		logrus.Errorf("Ignoring Invalid DeviceId=%d", info.DeviceID)
 		return nil
 	}
 
@@ -756,7 +778,7 @@ func (devices *DeviceSet) saveBaseDeviceUUID(baseInfo *devInfo) error {
 }
 
 func (devices *DeviceSet) setupBaseImage() error {
-	oldInfo, _ := devices.lookupDevice("")
+	oldInfo, _ := devices.lookupDeviceWithLock("")
 	if oldInfo != nil && oldInfo.Initialized {
 		// If BaseDeviceUUID is nil (upgrade case), save it and
 		// return success.
@@ -768,7 +790,7 @@ func (devices *DeviceSet) setupBaseImage() error {
 		}
 
 		if err := devices.verifyBaseDeviceUUID(oldInfo); err != nil {
-			return fmt.Errorf("Base Device UUID verification failed. Possibly using a different thin pool then last invocation:%v", err)
+			return fmt.Errorf("Base Device UUID verification failed. Possibly using a different thin pool than last invocation:%v", err)
 		}
 		return nil
 	}
@@ -1257,7 +1279,7 @@ func (devices *DeviceSet) initDevmapper(doInit bool) error {
 
 	// https://github.com/docker/docker/issues/4036
 	if supported := devicemapper.UdevSetSyncSupport(true); !supported {
-		logrus.Warn("Udev sync is not supported. This will lead to unexpected behavior, data loss and errors. For more information, see https://docs.docker.com/reference/commandline/cli/#daemon-storage-driver-option")
+		logrus.Warn("Udev sync is not supported. This will lead to unexpected behavior, data loss and errors. For more information, see https://docs.docker.com/reference/commandline/daemon/#daemon-storage-driver-option")
 	}
 
 	if err := os.MkdirAll(devices.metadataDir(), 0700); err != nil {
@@ -1397,6 +1419,12 @@ func (devices *DeviceSet) initDevmapper(doInit bool) error {
 		}
 	}
 
+	if devices.thinPoolDevice == "" {
+		if devices.metadataLoopFile != "" || devices.dataLoopFile != "" {
+			logrus.Warnf("Usage of loopback devices is strongly discouraged for production use. Please use `--storage-opt dm.thinpooldev` or use `man docker` to refer to dm.thinpooldev section.")
+		}
+	}
+
 	// Right now this loads only NextDeviceID. If there is more metadata
 	// down the line, we might have to move it earlier.
 	if err := devices.loadDeviceSetMetaData(); err != nil {
@@ -1419,7 +1447,7 @@ func (devices *DeviceSet) AddDevice(hash, baseHash string) error {
 	logrus.Debugf("[deviceset] AddDevice(hash=%s basehash=%s)", hash, baseHash)
 	defer logrus.Debugf("[deviceset] AddDevice(hash=%s basehash=%s) END", hash, baseHash)
 
-	baseInfo, err := devices.lookupDevice(baseHash)
+	baseInfo, err := devices.lookupDeviceWithLock(baseHash)
 	if err != nil {
 		return err
 	}
@@ -1441,6 +1469,7 @@ func (devices *DeviceSet) AddDevice(hash, baseHash string) error {
 	return nil
 }
 
+// Should be called with devices.Lock() held.
 func (devices *DeviceSet) deleteDevice(info *devInfo) error {
 	if devices.doBlkDiscard {
 		// This is a workaround for the kernel not discarding block so
@@ -1453,12 +1482,10 @@ func (devices *DeviceSet) deleteDevice(info *devInfo) error {
 		}
 	}
 
-	devinfo, _ := devicemapper.GetInfo(info.Name())
-	if devinfo != nil && devinfo.Exists != 0 {
-		if err := devices.removeDevice(info.Name()); err != nil {
-			logrus.Debugf("Error removing device: %s", err)
-			return err
-		}
+	// Try to deactivate deivce in case it is active.
+	if err := devices.deactivateDevice(info); err != nil {
+		logrus.Debugf("Error deactivating device: %s", err)
+		return err
 	}
 
 	if err := devices.openTransaction(info.Hash, info.DeviceID); err != nil {
@@ -1486,7 +1513,7 @@ func (devices *DeviceSet) deleteDevice(info *devInfo) error {
 
 // DeleteDevice deletes a device from the hash.
 func (devices *DeviceSet) DeleteDevice(hash string) error {
-	info, err := devices.lookupDevice(hash)
+	info, err := devices.lookupDeviceWithLock(hash)
 	if err != nil {
 		return err
 	}
@@ -1496,6 +1523,13 @@ func (devices *DeviceSet) DeleteDevice(hash string) error {
 
 	devices.Lock()
 	defer devices.Unlock()
+
+	// If mountcount is not zero, that means devices is still in use
+	// or has not been Put() properly. Fail device deletion.
+
+	if info.mountCount != 0 {
+		return fmt.Errorf("devmapper: Can't delete device %v as it is still mounted. mntCount=%v", info.Hash, info.mountCount)
+	}
 
 	return devices.deleteDevice(info)
 }
@@ -1509,12 +1543,16 @@ func (devices *DeviceSet) deactivatePool() error {
 	if err != nil {
 		return err
 	}
-	if d, err := devicemapper.GetDeps(devname); err == nil {
-		// Access to more Debug output
-		logrus.Debugf("[devmapper] devicemapper.GetDeps() %s: %#v", devname, d)
+
+	if devinfo.Exists == 0 {
+		return nil
 	}
-	if devinfo.Exists != 0 {
-		return devicemapper.RemoveDevice(devname)
+	if err := devicemapper.RemoveDevice(devname); err != nil {
+		return err
+	}
+
+	if d, err := devicemapper.GetDeps(devname); err == nil {
+		logrus.Warnf("[devmapper] device %s still has %d active dependents", devname, d.Count)
 	}
 
 	return nil
@@ -1618,11 +1656,11 @@ func (devices *DeviceSet) Shutdown() error {
 
 	var devs []*devInfo
 
-	devices.devicesLock.Lock()
+	devices.Lock()
 	for _, info := range devices.Devices {
 		devs = append(devs, info)
 	}
-	devices.devicesLock.Unlock()
+	devices.Unlock()
 
 	for _, info := range devs {
 		info.lock.Lock()
@@ -1643,7 +1681,7 @@ func (devices *DeviceSet) Shutdown() error {
 		info.lock.Unlock()
 	}
 
-	info, _ := devices.lookupDevice("")
+	info, _ := devices.lookupDeviceWithLock("")
 	if info != nil {
 		info.lock.Lock()
 		devices.Lock()
@@ -1669,7 +1707,7 @@ func (devices *DeviceSet) Shutdown() error {
 
 // MountDevice mounts the device if not already mounted.
 func (devices *DeviceSet) MountDevice(hash, path, mountLabel string) error {
-	info, err := devices.lookupDevice(hash)
+	info, err := devices.lookupDeviceWithLock(hash)
 	if err != nil {
 		return err
 	}
@@ -1723,7 +1761,7 @@ func (devices *DeviceSet) UnmountDevice(hash string) error {
 	logrus.Debugf("[devmapper] UnmountDevice(hash=%s)", hash)
 	defer logrus.Debugf("[devmapper] UnmountDevice(hash=%s) END", hash)
 
-	info, err := devices.lookupDevice(hash)
+	info, err := devices.lookupDeviceWithLock(hash)
 	if err != nil {
 		return err
 	}
@@ -1758,30 +1796,10 @@ func (devices *DeviceSet) UnmountDevice(hash string) error {
 	return nil
 }
 
-// HasDevice returns true if the device is in the hash and mounted.
+// HasDevice returns true if the device metadata exists.
 func (devices *DeviceSet) HasDevice(hash string) bool {
-	devices.Lock()
-	defer devices.Unlock()
-
-	info, _ := devices.lookupDevice(hash)
+	info, _ := devices.lookupDeviceWithLock(hash)
 	return info != nil
-}
-
-// HasActivatedDevice return true if the device exists.
-func (devices *DeviceSet) HasActivatedDevice(hash string) bool {
-	info, _ := devices.lookupDevice(hash)
-	if info == nil {
-		return false
-	}
-
-	info.lock.Lock()
-	defer info.lock.Unlock()
-
-	devices.Lock()
-	defer devices.Unlock()
-
-	devinfo, _ := devicemapper.GetInfo(info.Name())
-	return devinfo != nil && devinfo.Exists != 0
 }
 
 // List returns a list of device ids.
@@ -1789,15 +1807,12 @@ func (devices *DeviceSet) List() []string {
 	devices.Lock()
 	defer devices.Unlock()
 
-	devices.devicesLock.Lock()
 	ids := make([]string, len(devices.Devices))
 	i := 0
 	for k := range devices.Devices {
 		ids[i] = k
 		i++
 	}
-	devices.devicesLock.Unlock()
-
 	return ids
 }
 
@@ -1815,7 +1830,7 @@ func (devices *DeviceSet) deviceStatus(devName string) (sizeInSectors, mappedSec
 
 // GetDeviceStatus provides size, mapped sectors
 func (devices *DeviceSet) GetDeviceStatus(hash string) (*DevStatus, error) {
-	info, err := devices.lookupDevice(hash)
+	info, err := devices.lookupDeviceWithLock(hash)
 	if err != nil {
 		return nil, err
 	}
@@ -1941,7 +1956,7 @@ func (devices *DeviceSet) Status() *Status {
 
 // Status returns the current status of this deviceset
 func (devices *DeviceSet) exportDeviceMetadata(hash string) (*deviceMetadata, error) {
-	info, err := devices.lookupDevice(hash)
+	info, err := devices.lookupDeviceWithLock(hash)
 	if err != nil {
 		return nil, err
 	}

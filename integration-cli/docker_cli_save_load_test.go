@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -9,12 +10,14 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/go-check/check"
 )
 
 // save a repo using gz compression and try to load it using stdout
 func (s *DockerSuite) TestSaveXzAndLoadRepoStdout(c *check.C) {
+	testRequires(c, DaemonIsLinux)
 	name := "test-save-xz-and-load-repo-stdout"
 	dockerCmd(c, "run", "--name", name, "busybox", "true")
 
@@ -47,6 +50,7 @@ func (s *DockerSuite) TestSaveXzAndLoadRepoStdout(c *check.C) {
 
 // save a repo using xz+gz compression and try to load it using stdout
 func (s *DockerSuite) TestSaveXzGzAndLoadRepoStdout(c *check.C) {
+	testRequires(c, DaemonIsLinux)
 	name := "test-save-xz-gz-and-load-repo-stdout"
 	dockerCmd(c, "run", "--name", name, "busybox", "true")
 
@@ -79,6 +83,7 @@ func (s *DockerSuite) TestSaveXzGzAndLoadRepoStdout(c *check.C) {
 }
 
 func (s *DockerSuite) TestSaveSingleTag(c *check.C) {
+	testRequires(c, DaemonIsLinux)
 	repoName := "foobar-save-single-tag-test"
 	dockerCmd(c, "tag", "busybox:latest", fmt.Sprintf("%v:latest", repoName))
 
@@ -94,7 +99,26 @@ func (s *DockerSuite) TestSaveSingleTag(c *check.C) {
 	}
 }
 
+func (s *DockerSuite) TestSaveCheckTimes(c *check.C) {
+	repoName := "busybox:latest"
+	out, _ := dockerCmd(c, "inspect", repoName)
+	data := []struct {
+		ID      string
+		Created time.Time
+	}{}
+	err := json.Unmarshal([]byte(out), &data)
+	c.Assert(err, check.IsNil, check.Commentf("failed to marshal from %q: err %v", repoName, err))
+	c.Assert(len(data), check.Not(check.Equals), 0, check.Commentf("failed to marshal the data from %q", repoName))
+	tarTvTimeFormat := "2006-01-02 15:04"
+	out, _, err = runCommandPipelineWithOutput(
+		exec.Command(dockerBinary, "save", repoName),
+		exec.Command("tar", "tv"),
+		exec.Command("grep", "-E", fmt.Sprintf("%s %s", data[0].Created.Format(tarTvTimeFormat), data[0].ID)))
+	c.Assert(err, check.IsNil, check.Commentf("failed to save repo with image ID and 'repositories' file: %s, %v", out, err))
+}
+
 func (s *DockerSuite) TestSaveImageId(c *check.C) {
+	testRequires(c, DaemonIsLinux)
 	repoName := "foobar-save-image-id-test"
 	dockerCmd(c, "tag", "emptyfs:latest", fmt.Sprintf("%v:latest", repoName))
 
@@ -136,6 +160,7 @@ func (s *DockerSuite) TestSaveImageId(c *check.C) {
 
 // save a repo and try to load it using flags
 func (s *DockerSuite) TestSaveAndLoadRepoFlags(c *check.C) {
+	testRequires(c, DaemonIsLinux)
 	name := "test-save-and-load-repo-flags"
 	dockerCmd(c, "run", "--name", name, "busybox", "true")
 
@@ -160,6 +185,7 @@ func (s *DockerSuite) TestSaveAndLoadRepoFlags(c *check.C) {
 }
 
 func (s *DockerSuite) TestSaveMultipleNames(c *check.C) {
+	testRequires(c, DaemonIsLinux)
 	repoName := "foobar-save-multi-name-test"
 
 	// Make one image
@@ -179,7 +205,7 @@ func (s *DockerSuite) TestSaveMultipleNames(c *check.C) {
 }
 
 func (s *DockerSuite) TestSaveRepoWithMultipleImages(c *check.C) {
-
+	testRequires(c, DaemonIsLinux)
 	makeImage := func(from string, tag string) string {
 		var (
 			out string
@@ -225,6 +251,7 @@ func (s *DockerSuite) TestSaveRepoWithMultipleImages(c *check.C) {
 
 // Issue #6722 #5892 ensure directories are included in changes
 func (s *DockerSuite) TestSaveDirectoryPermissions(c *check.C) {
+	testRequires(c, DaemonIsLinux)
 	layerEntries := []string{"opt/", "opt/a/", "opt/a/b/", "opt/a/b/c"}
 	layerEntriesAUFS := []string{"./", ".wh..wh.aufs", ".wh..wh.orph/", ".wh..wh.plnk/", "opt/", "opt/a/", "opt/a/b/", "opt/a/b/c"}
 

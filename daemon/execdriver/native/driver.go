@@ -58,7 +58,7 @@ func NewDriver(root, initPath string, options []string) (*Driver, error) {
 
 	if apparmor.IsEnabled() {
 		if err := installAppArmorProfile(); err != nil {
-			apparmorProfiles := []string{"docker-default", "docker-unconfined"}
+			apparmorProfiles := []string{"docker-default"}
 
 			// Allow daemon to run if loading failed, but are active
 			// (possibly through another run, manually, or via system startup)
@@ -131,9 +131,9 @@ type execOutput struct {
 
 // Run implements the exec driver Driver interface,
 // it calls libcontainer APIs to run a container.
-func (d *Driver) Run(c *execdriver.Command, pipes *execdriver.Pipes, startCallback execdriver.StartCallback) (execdriver.ExitStatus, error) {
+func (d *Driver) Run(c *execdriver.Command, pipes *execdriver.Pipes, hooks execdriver.Hooks) (execdriver.ExitStatus, error) {
 	// take the Command and populate the libcontainer.Config from it
-	container, err := d.createContainer(c)
+	container, err := d.createContainer(c, hooks)
 	if err != nil {
 		return execdriver.ExitStatus{ExitCode: -1}, err
 	}
@@ -165,17 +165,18 @@ func (d *Driver) Run(c *execdriver.Command, pipes *execdriver.Pipes, startCallba
 		return execdriver.ExitStatus{ExitCode: -1}, err
 	}
 
-	if startCallback != nil {
+	oom := notifyOnOOM(cont)
+	if hooks.Start != nil {
+
 		pid, err := p.Pid()
 		if err != nil {
 			p.Signal(os.Kill)
 			p.Wait()
 			return execdriver.ExitStatus{ExitCode: -1}, err
 		}
-		startCallback(&c.ProcessConfig, pid)
+		hooks.Start(&c.ProcessConfig, pid, oom)
 	}
 
-	oom := notifyOnOOM(cont)
 	waitF := p.Wait
 	if nss := cont.Config().Namespaces; !nss.Contains(configs.NEWPID) {
 		// we need such hack for tracking processes with inherited fds,
@@ -196,7 +197,7 @@ func (d *Driver) Run(c *execdriver.Command, pipes *execdriver.Pipes, startCallba
 }
 
 // notifyOnOOM returns a channel that signals if the container received an OOM notification
-// for any process.  If it is unable to subscribe to OOM notifications then a closed
+// for any process. If it is unable to subscribe to OOM notifications then a closed
 // channel is returned as it will be non-blocking and return the correct result when read.
 func notifyOnOOM(container libcontainer.Container) <-chan struct{} {
 	oom, err := container.NotifyOOM()
@@ -476,4 +477,10 @@ func setupPipes(container *configs.Config, processConfig *execdriver.ProcessConf
 	}
 	processConfig.Terminal = term
 	return nil
+}
+
+// SupportsHooks implements the execdriver Driver interface.
+// The libcontainer/runC-based native execdriver does exploit the hook mechanism
+func (d *Driver) SupportsHooks() bool {
+	return true
 }

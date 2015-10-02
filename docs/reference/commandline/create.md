@@ -31,6 +31,7 @@ Creates a new container.
       --cpuset-mems=""              Memory nodes (MEMs) in which to allow execution (0-3, 0,1)
       --device=[]                   Add a host device to the container
       --dns=[]                      Set custom DNS servers
+      --dns-opt=[]                  Set custom DNS options
       --dns-search=[]               Set custom DNS search domains
       -e, --env=[]                  Set environment variables
       --entrypoint=""               Overwrite the default ENTRYPOINT of the image
@@ -40,6 +41,7 @@ Creates a new container.
       --help=false                  Print usage
       -i, --interactive=false       Keep STDIN open even if not attached
       --ipc=""                      IPC namespace to use
+      --kernel-memory=""            Kernel memory limit
       -l, --label=[]                Set metadata on the container (e.g., --label=com.example.key=value)
       --label-file=[]               Read in a line delimited file of labels
       --link=[]                     Add link to another container
@@ -48,6 +50,7 @@ Creates a new container.
       --lxc-conf=[]                 Add custom lxc options
       -m, --memory=""               Memory limit
       --mac-address=""              Container MAC address (e.g. 92:d0:c6:0a:29:33)
+      --memory-reservation=""       Memory soft limit
       --memory-swap=""              Total memory (memory + swap), '-1' to disable swap
       --memory-swappiness=""        Tune a container's memory swappiness behavior. Accepts an integer between 0 and 100.
       --name=""                     Assign a name to the container
@@ -58,8 +61,9 @@ Creates a new container.
       --pid=""                      PID namespace to use
       --privileged=false            Give extended privileges to this container
       --read-only=false             Mount the container's root filesystem as read only
-      --restart="no"                Restart policy (no, on-failure[:max-retry], always)
+      --restart="no"                Restart policy (no, on-failure[:max-retry], always, unless-stopped)
       --security-opt=[]             Security options
+      --stop-signal="SIGTERM"       Signal to stop a container
       -t, --tty=false               Allocate a pseudo-TTY
       --disable-content-trust=true  Skip image verification
       -u, --user=""                 Username or UID

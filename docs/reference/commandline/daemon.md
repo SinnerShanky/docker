@@ -5,6 +5,7 @@ description = "The daemon command description and usage"
 keywords = ["container, daemon, runtime"]
 [menu.main]
 parent = "smn_cli"
+weight=1
 +++
 <![end-metadata]-->
 
@@ -21,7 +22,10 @@ parent = "smn_cli"
       -D, --debug=false                      Enable debug mode
       --default-gateway=""                   Container default gateway IPv4 address
       --default-gateway-v6=""                Container default gateway IPv6 address
+      --cluster-store=""                     URL of the distributed storage backend
+      --cluster-advertise=""                 Address of the daemon instance to advertise
       --dns=[]                               DNS server to use
+      --dns-opt=[]                           DNS options to use
       --dns-search=[]                        DNS search domains to use
       --default-ulimit=[]                    Set default ulimit settings for containers
       -e, --exec-driver="native"             Exec driver to use
@@ -32,7 +36,7 @@ parent = "smn_cli"
       -G, --group="docker"                   Group for the unix socket
       -g, --graph="/var/lib/docker"          Root of the Docker runtime
       -H, --host=[]                          Daemon socket(s) to connect to
-      -h, --help=false                       Print usage
+      --help=false                           Print usage
       --icc=true                             Enable inter-container communication
       --insecure-registry=[]                 Enable insecure registry communication
       --ip=0.0.0.0                           Default IP when binding container ports
@@ -45,6 +49,7 @@ parent = "smn_cli"
       --log-driver="json-file"               Default driver for container logs
       --log-opt=[]                           Log driver specific options
       --mtu=0                                Set the containers network MTU
+      --no-legacy-registry=false             Do not contact legacy registries
       -p, --pidfile="/var/run/docker.pid"    Path to use for daemon PID file
       --registry-mirror=[]                   Preferred Docker registry mirror
       -s, --storage-driver=""                Storage driver to use
@@ -190,6 +195,12 @@ options for `zfs` start with `zfs`.
      thin-pool management feature include: automatic or interactive thin-pool
      resize support, dynamically changing thin-pool features, automatic thinp
      metadata checking when lvm activates the thin-pool, etc.
+
+     As a fallback if no thin pool is provided, loopback files will be
+     created. Loopback is very slow, but can be used without any
+     pre-configuration of storage. It is strongly recommended that you do 
+     not use loopback in production. Ensure your Docker daemon has a
+     `--storage-opt dm.thinpooldev` argument provided.
 
      Example use:
 
@@ -441,6 +452,16 @@ Local registries, whose IP address falls in the 127.0.0.0/8 range, are
 automatically marked as insecure as of Docker 1.3.2. It is not recommended to
 rely on this, as it may change in the future.
 
+Enabling `--insecure-registry`, i.e., allowing un-encrypted and/or untrusted
+communication, can be useful when running a local registry.  However, 
+because its use creates security vulnerabilities it should ONLY be enabled for
+testing purposes.  For increased security, users should add their CA to their 
+system's list of trusted CAs instead of enabling `--insecure-registry`.
+
+## Legacy Registries
+
+Enabling `--no-legacy-registry` forces a docker daemon to only interact with registries which support the V2 protocol.  Specifically, the daemon will not attempt `push`, `pull` and `login` to v1 registries.  The exception to this is `search` which can still be performed on v1 registries.
+
 ## Running a Docker daemon behind a HTTPS_PROXY
 
 When running inside a LAN that uses a `HTTPS` proxy, the Docker Hub
@@ -469,6 +490,12 @@ these defaults are not set, `ulimit` settings will be inherited, if not set on
 Be careful setting `nproc` with the `ulimit` flag as `nproc` is designed by Linux to
 set the maximum number of processes available to a user, not to a container. For details
 please check the [run](run.md) reference.
+
+## Nodes discovery
+
+`--cluster-advertise` specifies the 'host:port' combination that this particular
+daemon instance should use when advertising itself to the cluster. The daemon
+should be reachable by remote hosts on this 'host:port' combination.
 
 ## Miscellaneous options
 

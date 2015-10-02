@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 
 	"github.com/docker/docker/daemon/execdriver"
@@ -19,8 +20,7 @@ import (
 
 // Exec implements the exec driver Driver interface,
 // it calls libcontainer APIs to execute a container.
-// TODO(vishh): Add support for running in privileged mode.
-func (d *Driver) Exec(c *execdriver.Command, processConfig *execdriver.ProcessConfig, pipes *execdriver.Pipes, startCallback execdriver.StartCallback) (int, error) {
+func (d *Driver) Exec(c *execdriver.Command, processConfig *execdriver.ProcessConfig, pipes *execdriver.Pipes, hooks execdriver.Hooks) (int, error) {
 	active := d.activeContainers[c.ID]
 	if active == nil {
 		return -1, fmt.Errorf("No active container exists with ID %s", c.ID)
@@ -33,6 +33,17 @@ func (d *Driver) Exec(c *execdriver.Command, processConfig *execdriver.ProcessCo
 		User: processConfig.User,
 	}
 
+	if processConfig.Privileged {
+		p.Capabilities = execdriver.GetAllCapabilities()
+	}
+	// add CAP_ prefix to all caps for new libcontainer update to match
+	// the spec format.
+	for i, s := range p.Capabilities {
+		if !strings.HasPrefix(s, "CAP_") {
+			p.Capabilities[i] = fmt.Sprintf("CAP_%s", s)
+		}
+	}
+
 	config := active.Config()
 	if err := setupPipes(&config, processConfig, p, pipes); err != nil {
 		return -1, err
@@ -42,14 +53,19 @@ func (d *Driver) Exec(c *execdriver.Command, processConfig *execdriver.ProcessCo
 		return -1, err
 	}
 
-	if startCallback != nil {
+	if hooks.Start != nil {
 		pid, err := p.Pid()
 		if err != nil {
 			p.Signal(os.Kill)
 			p.Wait()
 			return -1, err
 		}
-		startCallback(&c.ProcessConfig, pid)
+
+		// A closed channel for OOM is returned here as it will be
+		// non-blocking and return the correct result when read.
+		chOOM := make(chan struct{})
+		close(chOOM)
+		hooks.Start(&c.ProcessConfig, pid, chOOM)
 	}
 
 	ps, err := p.Wait()

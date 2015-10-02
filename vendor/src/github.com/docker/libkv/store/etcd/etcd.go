@@ -8,14 +8,14 @@ import (
 	"time"
 
 	etcd "github.com/coreos/go-etcd/etcd"
+	"github.com/docker/libkv"
 	"github.com/docker/libkv/store"
 )
 
 // Etcd is the receiver type for the
 // Store interface
 type Etcd struct {
-	client       *etcd.Client
-	ephemeralTTL time.Duration
+	client *etcd.Client
 }
 
 type etcdLock struct {
@@ -33,24 +33,41 @@ const (
 	defaultUpdateTime = 5 * time.Second
 )
 
+// Register registers etcd to libkv
+func Register() {
+	libkv.AddStore(store.ETCD, New)
+}
+
 // New creates a new Etcd client given a list
 // of endpoints and an optional tls config
 func New(addrs []string, options *store.Config) (store.Store, error) {
 	s := &Etcd{}
 
-	entries := store.CreateEndpoints(addrs, "http")
-	s.client = etcd.NewClient(entries)
+	var (
+		entries []string
+		err     error
+	)
+
+	// Create the etcd client
+	if options != nil && options.ClientTLS != nil {
+		entries = store.CreateEndpoints(addrs, "https")
+		s.client, err = etcd.NewTLSClient(entries, options.ClientTLS.CertFile, options.ClientTLS.KeyFile, options.ClientTLS.CACertFile)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		entries = store.CreateEndpoints(addrs, "http")
+		s.client = etcd.NewClient(entries)
+	}
 
 	// Set options
 	if options != nil {
+		// Plain TLS config overrides ClientTLS if specified
 		if options.TLS != nil {
-			s.setTLS(options.TLS)
+			s.setTLS(options.TLS, addrs)
 		}
 		if options.ConnectionTimeout != 0 {
 			s.setTimeout(options.ConnectionTimeout)
-		}
-		if options.EphemeralTTL != 0 {
-			s.setEphemeralTTL(options.EphemeralTTL)
 		}
 	}
 
@@ -65,16 +82,10 @@ func New(addrs []string, options *store.Config) (store.Store, error) {
 	return s, nil
 }
 
-// SetTLS sets the tls configuration given the path
-// of certificate files
-func (s *Etcd) setTLS(tls *tls.Config) {
-	// Change to https scheme
-	var addrs []string
-	entries := s.client.GetCluster()
-	for _, entry := range entries {
-		addrs = append(addrs, strings.Replace(entry, "http", "https", -1))
-	}
-	s.client.SetCluster(addrs)
+// SetTLS sets the tls configuration given a tls.Config scheme
+func (s *Etcd) setTLS(tls *tls.Config, addrs []string) {
+	entries := store.CreateEndpoints(addrs, "https")
+	s.client.SetCluster(entries)
 
 	// Set transport
 	t := http.Transport{
@@ -91,12 +102,6 @@ func (s *Etcd) setTLS(tls *tls.Config) {
 // setTimeout sets the timeout used for connecting to the store
 func (s *Etcd) setTimeout(time time.Duration) {
 	s.client.SetDialTimeout(time)
-}
-
-// setEphemeralHeartbeat sets the heartbeat value to notify
-// that a node is alive
-func (s *Etcd) setEphemeralTTL(time time.Duration) {
-	s.ephemeralTTL = time
 }
 
 // createDirectory creates the entire path for a directory
@@ -120,11 +125,8 @@ func (s *Etcd) createDirectory(path string) error {
 func (s *Etcd) Get(key string) (pair *store.KVPair, err error) {
 	result, err := s.client.Get(store.Normalize(key), false, false)
 	if err != nil {
-		if etcdError, ok := err.(*etcd.EtcdError); ok {
-			// Not a Directory or Not a file
-			if etcdError.ErrorCode == 102 || etcdError.ErrorCode == 104 {
-				return nil, store.ErrKeyNotFound
-			}
+		if isKeyNotFoundError(err) {
+			return nil, store.ErrKeyNotFound
 		}
 		return nil, err
 	}
@@ -143,8 +145,8 @@ func (s *Etcd) Put(key string, value []byte, opts *store.WriteOptions) error {
 
 	// Default TTL = 0 means no expiration
 	var ttl uint64
-	if opts != nil && opts.Ephemeral {
-		ttl = uint64(s.ephemeralTTL.Seconds())
+	if opts != nil && opts.TTL > 0 {
+		ttl = uint64(opts.TTL.Seconds())
 	}
 
 	if _, err := s.client.Set(key, string(value), ttl); err != nil {
@@ -173,14 +175,17 @@ func (s *Etcd) Put(key string, value []byte, opts *store.WriteOptions) error {
 // Delete a value at "key"
 func (s *Etcd) Delete(key string) error {
 	_, err := s.client.Delete(store.Normalize(key), false)
+	if isKeyNotFoundError(err) {
+		return store.ErrKeyNotFound
+	}
 	return err
 }
 
 // Exists checks if the key exists inside the store
 func (s *Etcd) Exists(key string) (bool, error) {
-	entry, err := s.Get(key)
-	if err != nil && entry != nil {
-		if err == store.ErrKeyNotFound || entry.Value == nil {
+	_, err := s.Get(key)
+	if err != nil {
+		if err == store.ErrKeyNotFound {
 			return false, nil
 		}
 		return false, err
@@ -194,12 +199,6 @@ func (s *Etcd) Exists(key string) (bool, error) {
 // be sent to the channel. Providing a non-nil stopCh can
 // be used to stop watching.
 func (s *Etcd) Watch(key string, stopCh <-chan struct{}) (<-chan *store.KVPair, error) {
-	// Get the current value
-	current, err := s.Get(key)
-	if err != nil {
-		return nil, err
-	}
-
 	// Start an etcd watch.
 	// Note: etcd will send the current value through the channel.
 	etcdWatchCh := make(chan *etcd.Response)
@@ -212,12 +211,23 @@ func (s *Etcd) Watch(key string, stopCh <-chan struct{}) (<-chan *store.KVPair, 
 	go func() {
 		defer close(watchCh)
 
+		// Get the current value
+		current, err := s.Get(key)
+		if err != nil {
+			return
+		}
+
 		// Push the current value through the channel.
 		watchCh <- current
 
 		for {
 			select {
 			case result := <-etcdWatchCh:
+				if result == nil || result.Node == nil {
+					// Something went wrong, exit
+					// No need to stop the chan as the watch already ended
+					return
+				}
 				watchCh <- &store.KVPair{
 					Key:       key,
 					Value:     []byte(result.Node.Value),
@@ -238,12 +248,6 @@ func (s *Etcd) Watch(key string, stopCh <-chan struct{}) (<-chan *store.KVPair, 
 // will be sent to the channel .Providing a non-nil stopCh can
 // be used to stop watching.
 func (s *Etcd) WatchTree(directory string, stopCh <-chan struct{}) (<-chan []*store.KVPair, error) {
-	// Get child values
-	current, err := s.List(directory)
-	if err != nil {
-		return nil, err
-	}
-
 	// Start the watch
 	etcdWatchCh := make(chan *etcd.Response)
 	etcdStopCh := make(chan bool)
@@ -255,12 +259,23 @@ func (s *Etcd) WatchTree(directory string, stopCh <-chan struct{}) (<-chan []*st
 	go func() {
 		defer close(watchCh)
 
+		// Get child values
+		current, err := s.List(directory)
+		if err != nil {
+			return
+		}
+
 		// Push the current value through the channel.
 		watchCh <- current
 
 		for {
 			select {
-			case <-etcdWatchCh:
+			case event := <-etcdWatchCh:
+				if event == nil {
+					// Something went wrong, exit
+					// No need to stop the chan as the watch already ended
+					return
+				}
 				// FIXME: We should probably use the value pushed by the channel.
 				// However, Node.Nodes seems to be empty.
 				if list, err := s.List(directory); err == nil {
@@ -349,6 +364,9 @@ func (s *Etcd) AtomicDelete(key string, previous *store.KVPair) (bool, error) {
 func (s *Etcd) List(directory string) ([]*store.KVPair, error) {
 	resp, err := s.client.Get(store.Normalize(directory), true, true)
 	if err != nil {
+		if isKeyNotFoundError(err) {
+			return nil, store.ErrKeyNotFound
+		}
 		return nil, err
 	}
 	kv := []*store.KVPair{}
@@ -366,6 +384,9 @@ func (s *Etcd) List(directory string) ([]*store.KVPair, error) {
 // DeleteTree deletes a range of keys under a given directory
 func (s *Etcd) DeleteTree(directory string) error {
 	_, err := s.client.Delete(store.Normalize(directory), true)
+	if isKeyNotFoundError(err) {
+		return store.ErrKeyNotFound
+	}
 	return err
 }
 
@@ -422,7 +443,7 @@ func (l *etcdLock) Lock() (<-chan struct{}, error) {
 			lastIndex = resp.Node.ModifiedIndex
 		}
 
-		_, err = l.client.CompareAndSwap(key, l.value, l.ttl, "", lastIndex)
+		l.last, err = l.client.CompareAndSwap(key, l.value, l.ttl, "", lastIndex)
 
 		if err == nil {
 			// Leader section
@@ -457,7 +478,7 @@ func (l *etcdLock) holdLock(key string, lockHeld chan struct{}, stopLocking chan
 	for {
 		select {
 		case <-update.C:
-			l.last, err = l.client.Update(key, l.value, l.ttl)
+			l.last, err = l.client.CompareAndSwap(key, l.value, l.ttl, "", l.last.Node.ModifiedIndex)
 			if err != nil {
 				return
 			}
@@ -496,4 +517,16 @@ func (l *etcdLock) Unlock() error {
 // Close closes the client connection
 func (s *Etcd) Close() {
 	return
+}
+
+func isKeyNotFoundError(err error) bool {
+	if err != nil {
+		if etcdError, ok := err.(*etcd.EtcdError); ok {
+			// Not a Directory or Not a file
+			if etcdError.ErrorCode == 100 || etcdError.ErrorCode == 102 || etcdError.ErrorCode == 104 {
+				return true
+			}
+		}
+	}
+	return false
 }
